@@ -5,10 +5,10 @@ import theano.tensor as T
 def detect_nan(i, node, fn):
     for output in fn.outputs:
         if (not isinstance(output[0], numpy.random.RandomState) and numpy.isnan(output[0]).any()):
-            print '*** NaN detected ***'
+            print('*** NaN detected ***')
             theano.printing.debugprint(node)
-            print 'Inputs : %s' % [input[0] for input in fn.inputs]
-            print 'Outputs: %s' % [output[0] for output in fn.outputs]
+            print('Inputs : %s' % [input[0] for input in fn.inputs])
+            print('Outputs: %s' % [output[0] for output in fn.outputs])
             break
 
 class Layer(object):
@@ -85,14 +85,17 @@ class TransformLayer(Layer):
         # Initialize W randomly.
         if W is None:
             # W is an (input length) x (output length) matrix
-            W_values = numpy.asarray(
-                rng.uniform(
-                    low=-numpy.sqrt(6. / (input.output_length + output_length)),
-                    high=numpy.sqrt(6. / (input.output_length + output_length)),
-                    size=(input.output_length, output_length)
-                ),
-                dtype=theano.config.floatX
-            )
+            if activation is T.nnet.softmax:
+                W_values = numpy.zeros((input.output_length, output_length), dtype=theano.config.floatX)
+            else:
+                W_values = numpy.asarray(
+                    rng.uniform(
+                        low=-numpy.sqrt(6. / (input.output_length + output_length)),
+                        high=numpy.sqrt(6. / (input.output_length + output_length)),
+                        size=(input.output_length, output_length)
+                    ),
+                    dtype=theano.config.floatX
+                )
 
             # Apparently, when using a sigmoid activation function,
             # you want to use initlialization values four times greater in
@@ -142,12 +145,12 @@ class Collector(Layer):
     def __init__(self, collection, cost, learning_rate = 0.01):
         # Remember inputs and outputs
         self.collection = collection
-        self.inputs = sum(map(lambda x: x.collect_inputs(), collection), [])
-        self.params = sum(map(lambda x: x.collect_params(), collection), [])
+        self.inputs = sum([x.collect_inputs() for x in collection], [])
+        self.params = sum([x.collect_params() for x in collection], [])
 
-        self.output = cost(map(lambda x: x.output, collection))
+        self.output = cost([x.output for x in collection])
 
-        self.gparams = map(lambda param: T.grad(self.output, param), self.params)
+        self.gparams = [T.grad(self.output, param) for param in self.params]
 
         updates = [
             (param, param - learning_rate * gparam)
@@ -183,24 +186,27 @@ if __name__ == '__main__':
 
     forward = theano.function([x], out.output)
 
-    print collector.inputs
-    print collector.params
+    print(collector.inputs)
+    print(collector.params)
 
     string = open("OANC.txt", "r").read()
 
+    def clamped_ord(char):
+      return max(0, min(ord(char), 255))
+
     def assemble_minibatch(length):
-        value = numpy.zeros([length, 256 * 2])
+        value = numpy.zeros([length, 256 * 2], dtype=theano.config.floatX)
         output = numpy.zeros(length, dtype=numpy.uint8)
         for i in range(0, length):
             # Get a random sample
             index = rng.randint(len(string) - 2)
-            value[i][ord(string[index])] = 1
-            value[i][256 + ord(string[index + 1])] = 1
-            output[i] = ord(string[index + 2])
+            value[i][clamped_ord(string[index])] = 1
+            value[i][256 + clamped_ord(string[index + 1])] = 1
+            output[i] = clamped_ord(string[index + 2])
         return value, output
 
-    def generate(length, begin = 'th'):
-        value = numpy.zeros([1, 256 * 2])
+    def generate(length, begin = 'ab'):
+        value = numpy.zeros([1, 256 * 2], dtype=theano.config.floatX)
 
         string = begin
         cursor = begin
@@ -212,12 +218,19 @@ if __name__ == '__main__':
             result = forward(value)[0]
             char = chr(numpy.random.choice(len(result), p = result / sum(result)))
 
+            value[0][ord(cursor[0])] = 0
+            value[0][256 + ord(cursor[1])] = 0
+
             string += char
             cursor = cursor[1] + char
 
         return string
 
-    for i in range(0, 1000):
-        print "'%r'" % generate(80)
-        value, output = assemble_minibatch(MINIBATCH_LENGTH)
-        print collector.train(value, output)
+    gradient = theano.function([x, y], collector.gparams[0])
+
+    error = float('inf')
+    while True:
+       print("'%r'" % generate(80))
+       value, output = assemble_minibatch(MINIBATCH_LENGTH)
+       error = collector.train(value, output)
+       print(error)
