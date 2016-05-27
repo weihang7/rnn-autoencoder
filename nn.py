@@ -42,7 +42,7 @@ class ConcatLayer(Layer):
         self.dependencies = [input1, input2]
         self.raw_inputs = []
 
-        self.output = T.concat([input1, input2])
+        self.output = T.concatenate([input1.output, input2.output])
 
 class InputLayer(Layer):
     def __init__(self, input, length):
@@ -66,7 +66,7 @@ class MultiplyLayer(Layer):
         self.dependencies = [input1, input2]
         self.raw_inputs = []
 
-        self.output = input1 * input2
+        self.output = input1.output * input2.output
 
 class AddLayer(Layer):
     def __init__(self, input1, input2):
@@ -80,8 +80,21 @@ class AddLayer(Layer):
         self.dependencies = [input1, input2]
         self.raw_inputs = []
 
-        self.output = input1 + input2
+        self.output = input1.output + input2.output
 
+class MapLayer(Layer):
+    def __init__(self, input, func):
+        self.input = input
+        self.output_length = input.output_length
+
+        self.trainable_params = []
+        self.dependencies = [input]
+        self.raw_inputs = []
+
+        self.output = func(input.output)
+
+def crossEntropy(input, compare):
+    return T.nnet.categorical_crossentropy(input, compare).mean()
 
 class TransformLayer(Layer):
     def __init__(self,
@@ -142,18 +155,8 @@ class TransformLayer(Layer):
             lin_output if activation is None
             else activation(lin_output)
         )
-
-class CrossEntropyLayer(Layer):
-    def __init__(self, input, compare):
-        self.trainable_params = []
-        self.dependencies = [
-            input
-        ]
-        self.raw_inputs = [
-            compare
-        ]
-
-        self.output = T.nnet.categorical_crossentropy(input.output, compare).mean()
+        #self.output = self.output.reshape(self.output.shape, ndim=1)
+        print self.output.ndim
 
 class Collector(Layer):
     def __init__(self, collection, cost, learning_rate = 0.01):
@@ -178,13 +181,15 @@ class Collector(Layer):
         )
 
 class RecurrentCollector(Layer):
-    def __init__(self, collection, recurrence, learning_rate = 0.01):
+    def __init__(self, collection, recurrence, correct, learning_rate = 0.01):
         # Remember inputs and outputs
         self.collection = collection
         self.inputs = collection.collect_inputs()
         self.params = collection.collect_params()
 
-        self.output = collection.output
+        print collection.output
+        self.output = crossEntropy(collection.output, correct)
+        #self.output = collection.output
 
         self.gparams = [T.grad(self.output, param) for param in self.params]
 
@@ -195,6 +200,7 @@ class RecurrentCollector(Layer):
             T.arange(recurrence[1].output.shape[0])
         )
 
+        # what is a grad_addend?
         grad_addend = map(
             lambda param: theano.scan(
                 lambda i: T.grad(recurrence[1].output[i], param),
@@ -221,6 +227,7 @@ class RecurrentCollector(Layer):
         self.inputs.append(old_recurrent_grad)
 
         # Frank -- can you add old_recurrent_grad as another set of inputs to the train functino
+        # Isn't it already added?
         self.train = theano.function(
             inputs=self.inputs,
             outputs=(self.output, new_recurrent_grad),
@@ -232,10 +239,10 @@ MINIBATCH_LENGTH = 1000
 # Build the neural network
 if __name__ == '__main__':
     # Characters:
-    x = T.matrix('x')
+    x = T.vector('x')
 
     # Hidden layer:
-    h = T.matrix('h')
+    h = T.vector('h')
 
     # Classifications
     y = T.ivector('y')
@@ -246,6 +253,11 @@ if __name__ == '__main__':
     # Build the neural network
     char_in = InputLayer(x, 256)
     hidden_in = InputLayer(h, 1500)
+
+    # TODO WTF is this comment???
+    # Now we have the update gate to determine
+    # how much of the new hidden value we should actually put in
+    all_info = ConcatLayer(char_in, hidden_in)
 
     # Compute the new value we might want to place
     # in the GRU. First, we have a layer to determine
@@ -260,12 +272,8 @@ if __name__ == '__main__':
     # Then we transform with tanh to get the new values
     new_hidden_value = TransformLayer(rng, new_info, 1500)
 
-    # Now we have the update gate to determine
-    # how much of the new hidden value we should actually put in
-    all_info = ConcatLayer(char_in, hidden_in)
-
     update_signal = TransformLayer(rng, all_info, 1500, activation = T.nnet.sigmoid)
-    inverse_update_signal = MapLayer(update_signal, lambda x: 1 - x) # Frank -- can you implement MapLayer here so that it does what we want
+    inverse_update_signal = MapLayer(update_signal, lambda x: 1 - x)
 
     filtered_values = MultiplyLayer(inverse_update_signal, hidden_in)
     values_to_insert = MultiplyLayer(update_signal, new_hidden_value)
@@ -276,7 +284,7 @@ if __name__ == '__main__':
     output = TransformLayer(rng, hidden_out, 256, activation = T.nnet.softmax)
 
     # Our training thing is a recurrent collector
-    collector = RecurrentCollector(output, (hidden_in, hidden_out))
+    collector = RecurrentCollector(output, (hidden_in, hidden_out), y)
 
     '''
     print(collector.inputs)
