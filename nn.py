@@ -187,20 +187,18 @@ class RecurrentCollector(Layer):
         self.inputs = collection.collect_inputs()
         self.params = collection.collect_params()
 
-        print collection.output
         self.output = crossEntropy(collection.output, correct)
         #self.output = collection.output
 
         self.gparams = [T.grad(self.output, param) for param in self.params]
 
-
         # Recurrence is a tuple linking an output layer to an input layer
+        print recurrence[0].output.ndim, recurrence[1].output.ndim
         recurrent_grad = theano.scan(
-            lambda i: T.grad(recurrence[1].output[i], recurrence[0].output),
+            lambda i: T.grad(recurrence[1].output[i], recurrence[0].output[i]),
             T.arange(recurrence[1].output.shape[0])
         )
 
-        # what is a grad_addend?
         grad_addend = map(
             lambda param: theano.scan(
                 lambda i: T.grad(recurrence[1].output[i], param),
@@ -239,10 +237,10 @@ MINIBATCH_LENGTH = 1000
 # Build the neural network
 if __name__ == '__main__':
     # Characters:
-    x = T.vector('x')
+    x = T.matrix('x')
 
     # Hidden layer:
-    h = T.vector('h')
+    h = T.matrix('h')
 
     # Classifications
     y = T.ivector('y')
