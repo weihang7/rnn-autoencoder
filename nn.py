@@ -30,6 +30,20 @@ class Layer(object):
             inputs.append(input)
         return inputs
 
+class ConcatLayer(Layer):
+    def __init__(self, input1, input2):
+        self.input1 = input2
+        self.input2 = input2
+
+        # The output lengths should really be the same
+        self.output_length = input1.output_length + input2.output_length
+
+        self.trainable_params = []
+        self.dependencies = [input1, input2]
+        self.raw_inputs = []
+
+        self.output = T.concat([input1, input2])
+
 class InputLayer(Layer):
     def __init__(self, input, length):
         self.output_length = length
@@ -163,12 +177,65 @@ class Collector(Layer):
             updates=updates
         )
 
+class RecurrentCollector(Layer):
+    def __init__(self, collection, recurrence, learning_rate = 0.01):
+        # Remember inputs and outputs
+        self.collection = collection
+        self.inputs = collection.collect_inputs()
+        self.params = collection.collect_params()
+
+        self.output = collection.output
+
+        self.gparams = [T.grad(self.output, param) for param in self.params]
+
+
+        # Recurrence is a tuple linking an output layer to an input layer
+        recurrent_grad = theano.scan(
+            lambda i: T.grad(recurrence[1].output[i], recurrence[0].output),
+            T.arange(recurrence[1].output.shape[0])
+        )
+
+        grad_addend = map(
+            lambda param: theano.scan(
+                lambda i: T.grad(recurrence[1].output[i], param),
+                T.arange(recurrence[1].output.shape[0])
+            ),
+            self.params
+        )
+
+        # old_recurrent_grad and new_recurrent_grad are supposed to be arrays of
+        # tensors, each with recurrent_grad[i] = gradient(recurrence_layer, params[i])
+        #
+        # Frank -- can you fix old_recurrent_grad so that it is actually like this
+        old_recurrent_grad = [T.vector()]
+        new_recurrent_grad = map(
+            lambda el, i: T.dot(recurrent_grad, el) + grad_addend[i],
+            old_recurrent_grad
+        )
+
+        updates = [
+            (param, param - learning_rate * gparam)
+            for param, gparam in zip(self.params, new_recurrent_grad)
+        ]
+
+        self.inputs.append(old_recurrent_grad)
+
+        # Frank -- can you add old_recurrent_grad as another set of inputs to the train functino
+        self.train = theano.function(
+            inputs=self.inputs,
+            outputs=(self.output, new_recurrent_grad),
+            updates=updates
+        )
+
 MINIBATCH_LENGTH = 1000
 
 # Build the neural network
 if __name__ == '__main__':
-    # Character counts:
+    # Characters:
     x = T.matrix('x')
+
+    # Hidden layer:
+    h = T.matrix('h')
 
     # Classifications
     y = T.ivector('y')
@@ -177,15 +244,41 @@ if __name__ == '__main__':
     rng = numpy.random.RandomState(1234)
 
     # Build the neural network
-    xlayer = InputLayer(x, 256 * 2)
-    hidden = TransformLayer(rng, xlayer, 1500, activation = T.nnet.relu)
-    out = TransformLayer(rng, hidden, 256, activation = T.nnet.softmax)
-    comparator = CrossEntropyLayer(out, y)
+    char_in = InputLayer(x, 256)
+    hidden_in = InputLayer(h, 1500)
 
-    collector = Collector([comparator], lambda x: x[0], learning_rate = 0.01)
+    # Compute the new value we might want to place
+    # in the GRU. First, we have a layer to determine
+    # how much of the historical hidden input we want to use
+    use_history_signal = TransformLayer(rng, all_info, 1500, activation = T.nnet.sigmoid)
+    used_history = MultiplyLayer(use_history_signal, hidden_in)
 
-    forward = theano.function([x], out.output)
+    # Then we collect that much of the hidden input
+    # with the actual input
+    new_info = ConcatLayer(hidden_in, used_history)
 
+    # Then we transform with tanh to get the new values
+    new_hidden_value = TransformLayer(rng, new_info, 1500)
+
+    # Now we have the update gate to determine
+    # how much of the new hidden value we should actually put in
+    all_info = ConcatLayer(char_in, hidden_in)
+
+    update_signal = TransformLayer(rng, all_info, 1500, activation = T.nnet.sigmoid)
+    inverse_update_signal = MapLayer(update_signal, lambda x: 1 - x) # Frank -- can you implement MapLayer here so that it does what we want
+
+    filtered_values = MultiplyLayer(inverse_update_signal, hidden_in)
+    values_to_insert = MultiplyLayer(update_signal, new_hidden_value)
+
+    hidden_out = AddLayer(filtered_values, values_to_insert)
+
+    # Finally, a softmax layer from the hidden output to a character
+    output = TransformLayer(rng, hidden_out, 256, activation = T.nnet.softmax)
+
+    # Our training thing is a recurrent collector
+    collector = RecurrentCollector(output, (hidden_in, hidden_out))
+
+    '''
     print(collector.inputs)
     print(collector.params)
 
@@ -205,7 +298,7 @@ if __name__ == '__main__':
             output[i] = clamped_ord(string[index + 2])
         return value, output
 
-    def generate(length, begin = 'ab'):
+    def generate(length, begin = 'th'):
         value = numpy.zeros([1, 256 * 2], dtype=theano.config.floatX)
 
         string = begin
@@ -234,3 +327,4 @@ if __name__ == '__main__':
        value, output = assemble_minibatch(MINIBATCH_LENGTH)
        error = collector.train(value, output)
        print(error)
+    '''
